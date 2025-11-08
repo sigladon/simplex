@@ -394,7 +394,9 @@ function handle_constraints(problem::SimplexProblem)
     handle_constraints(problem) # Permanecer en el submenú
 end
 
-# Función para manejar la resolución del problema
+"""
+Llama a las funciones del metodo simplex e imprime resultados.
+"""
 function handle_solve(problem::SimplexProblem)
     try
         # Construir el tableau inicial
@@ -409,21 +411,24 @@ function handle_solve(problem::SimplexProblem)
         println("\nTabla final del método Simplex:")
         print_tableau(tableau_final, var_names)
 
-        # ===================== RESULTADOS ======================
-        println("\n====================== RESULTADOS ======================")
+        # Resultados
+        println("\n","=" ^ 20," RESULTADOS ", "=" ^ 20)
         
         # Mostrar el problema original
         tipo = problem.objective_type == :maximize ? "Maximizar" : "Minimizar"
         obj_str = join(["$(problem.objective_coeffs[i])x$i" for i in 1:problem.num_variables], " + ")
         println("Problema original:")
         println("  $tipo Z = $obj_str")
+
+        # Construir string de restricciones
+        println("\nSujeto a:")
         for (i, (coeffs, type, rhs)) in enumerate(problem.constraints)
-            restr = join(["$(coeffs[j])x$j" for j in 1:length(coeffs)], " + ")
+            restr = join(["$(coeffs[j])x$j" for j in eachindex(coeffs)], " + ")
             type_str = type == Symbol("==") ? "=" : (type == :<= ? "<=" : (type == :>= ? ">=" : string(type)))
-            println("  $restr $type_str $rhs")
+            println("  $(i). $restr $type_str $rhs")
         end
-        println("  xj ≥ 0")
-        println("-------------------------------------------------------")
+        println("  $(length(problem.constraints) + 1). xj ≥ 0")
+        println("-" ^ 55)
 
         # Mostrar número de iteraciones
         @printf("Número de iteraciones: %d\n", iterations)
@@ -432,16 +437,12 @@ function handle_solve(problem::SimplexProblem)
         for (name, val) in zip(var_names, variable_values)
             @printf("%-4s = %8.4f\n", name, val)
         end
-        println("-------------------------------------------------------")
+        println("-" ^ 55)
 
-        # Calcular valor óptimo de Z
-        z_value = tableau[end, end]
-        if problem.objective_type == :minimize
-            z_value = -z_value   # Corrige el signo si es un problema de minimización
-        end
+        z_value = problem.objective_type == :minimize ? -z_opt : z_opt # Corregir signo si es minimización
 
         println("Valor óptimo de Z = $(round(z_value, digits=4))")
-        println("=======================================================")
+        println("=" ^ 55)
     catch e
         println("\nError al resolver: ", e)
     end
@@ -452,28 +453,31 @@ end
 
 # --- 4. Funciones del Método Simplex ---
 
-const M = 1e6  # M grande
+const M = 1e6  # Constante M grande, usada para penalizar variables artificiales
 
 """
 Convierte el problema a forma estándar con variables de holgura, exceso y artificiales.
 Devuelve el tableau inicial y una lista con los nombres de las variables.
 """
 function build_simplex_table(problem::SimplexProblem)
+    # Verificación de integridad del problema
     if isnothing(problem.num_variables) || isnothing(problem.objective_type) || isempty(problem.constraints)
         error("El problema no está completamente definido.")
     end
 
-    num_vars = problem.num_variables
-    num_cons = length(problem.constraints)
 
-    A = zeros(Float64, num_cons, num_vars)
-    b = zeros(Float64, num_cons)
-    types = Symbol[]
+    num_vars = problem.num_variables # Variables de decisión originales
+    num_cons = length(problem.constraints) # Número de restricciones
 
-    for (i, (coeffs, type, rhs)) in enumerate(problem.constraints)
-        A[i, :] .= coeffs
-        b[i] = rhs
-        push!(types, type)
+    A = zeros(Float64, num_cons, num_vars) # Matriz de coeficientes
+    b = zeros(Float64, num_cons) # Vector de términos independientes
+    types = Symbol[] # Tipos de restricciones
+
+    # Llenar A, b y types
+    for (i, (coeffs, type, rhs)) in enumerate(problem.constraints) 
+        A[i, :] .= coeffs # Asignar fila de coeficientes
+        b[i] = rhs # Asignar RHS
+        push!(types, type) # Asignar tipo de restricción
     end
 
     # Contadores
@@ -493,14 +497,16 @@ function build_simplex_table(problem::SimplexProblem)
         end
     end
 
-    total_vars = num_vars + slack_vars + excess_vars + artificial_vars
-    tableau = zeros(Float64, num_cons + 1, total_vars + 1)
+    total_vars = num_vars + slack_vars + excess_vars + artificial_vars # Total de variables en el tableau
+    tableau = zeros(Float64, num_cons + 1, total_vars + 1) # +1 para Z y RHS
 
+    # Nombres de las variables
     var_names = String[]
     for i in 1:num_vars
         push!(var_names, "x$i")
     end
 
+    # Índices de columnas para variables adicionales
     slack_col = num_vars + 1
     excess_col = num_vars + slack_vars + 1
     art_col = num_vars + slack_vars + excess_vars + 1
@@ -508,52 +514,52 @@ function build_simplex_table(problem::SimplexProblem)
     # Construir filas de restricciones
     for i in 1:num_cons
         tableau[i, 1:num_vars] = A[i, :]
-        if types[i] == :<=
-            tableau[i, slack_col] = 1
-            push!(var_names, "s$(slack_col - num_vars)")
+        if types[i] == :<= 
+            tableau[i, slack_col] = 1 # Colocar coeficiente de holgura
+            push!(var_names, "s$(slack_col - num_vars)") # Nombre de variable de holgura
             slack_col += 1
         elseif types[i] == :>=
-            tableau[i, excess_col] = -1
-            push!(var_names, "e$(excess_col - num_vars - slack_vars)")
-            tableau[i, art_col] = 1
-            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)")
+            tableau[i, excess_col] = -1 # Colocar coeficiente de exceso
+            push!(var_names, "e$(excess_col - num_vars - slack_vars)") # Nombre de variable de exceso
+            tableau[i, art_col] = 1 # Colocar coeficiente de artificial
+            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)") # Nombre de variable artificial
             art_col += 1
             excess_col += 1
         elseif types[i] == Symbol("==")
-            tableau[i, art_col] = 1
-            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)")
+            tableau[i, art_col] = 1 # Colocar coeficiente de artificial
+            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)") # Nombre de variable artificial
             art_col += 1
         end
-        tableau[i, end] = b[i]
+        tableau[i, end] = b[i] # RHS
     end
 
-    # Ajustar longitud de var_names
+    # Completar nombres de variables si faltan
     while length(var_names) < total_vars
-        push!(var_names, "var$(length(var_names)+1)")
+        push!(var_names, "var$(length(var_names)+1)") # Nombre genérico
     end
 
     # --- Función Objetivo ---
-    z_sign = problem.objective_type == :maximize ? -1.0 : 1.0
-    tableau[end, 1:num_vars] = z_sign .* problem.objective_coeffs
+    z_sign = problem.objective_type == :maximize ? -1.0 : 1.0 # Negativo para maximizar
+    tableau[end, 1:num_vars] = z_sign .* problem.objective_coeffs # Coeficientes de la F.O.
 
     # Penalización por M grande (solo si hay variables artificiales)
     if artificial_vars > 0
-        start_artificial = total_vars - artificial_vars + 1
-        for j in start_artificial:total_vars
-            tableau[end, j] = M * z_sign
+        start_artificial = total_vars - artificial_vars + 1 #
+        for j in start_artificial:total_vars # Encontrar columna inicial de artificiales
+            tableau[end, j] = M * z_sign # Penalizar variables artificiales
         end
 
         # Restar las filas donde las artificiales son básicas
         for i in 1:num_cons
             for j in start_artificial:total_vars
                 if tableau[i, j] == 1
-                    tableau[end, :] .-= M * z_sign .* tableau[i, :]
+                    tableau[end, :] .-= M * z_sign .* tableau[i, :] # Corrige la fila de Z
                 end
             end
         end
     end
 
-    return tableau, var_names
+    return tableau, var_names # Devolver tableau y nombres de variables
 end
 
 
@@ -565,10 +571,10 @@ Devuelve: tabla final, valor óptimo, valores de variables, iteraciones.
 const max_iter = 200
 
 function simplex_solve(tableau::Matrix{Float64})
-    m, n = size(tableau)
-    iter = 0
+    m, n = size(tableau) # m filas, n columnas
+    iter = 0 # Contador de iteraciones
 
-    while true
+    while true # Bucle principal del Simplex
         iter += 1
 
         # Verificación de límite de iteraciones
@@ -584,37 +590,39 @@ function simplex_solve(tableau::Matrix{Float64})
             break
         end
 
-        pivot_col = argmin(z_row)
+        pivot_col = argmin(z_row) # Encuentra la columna pivote (variable que entra)
 
+        # Criterio de razón mínima
         ratios = [tableau[i, end] / tableau[i, pivot_col] for i in 1:m-1 if tableau[i, pivot_col] > 0]
         if isempty(ratios)
             println("Problema no acotado.")
             break
         end
+        # Fila pivote (variables que salen)
         pivot_row = argmin([tableau[i, end] / tableau[i, pivot_col] > 0 ? tableau[i, end] / tableau[i, pivot_col] : Inf for i in 1:m-1])
 
-        pivot_val = tableau[pivot_row, pivot_col]
-        tableau[pivot_row, :] ./= pivot_val
+        pivot_val = tableau[pivot_row, pivot_col] # Valor pivote
+        tableau[pivot_row, :] ./= pivot_val # Normalizar fila pivote a 1
 
         for i in 1:m
             if i != pivot_row
-                factor = tableau[i, pivot_col]
-                tableau[i, :] .-= factor .* tableau[pivot_row, :]
+                factor = tableau[i, pivot_col] # Factor para eliminar columna pivote
+                tableau[i, :] .-= factor .* tableau[pivot_row, :] # Actualizar fila 
             end
         end
     end
 
-    variable_values = zeros(Float64, n - 1)
-    for j in 1:n-1
-        col = tableau[1:end-1, j]
-        if count(!iszero, col) == 1 && any(col .== 1.0)
-            row_index = findfirst(x -> x == 1.0, col)
-            variable_values[j] = tableau[row_index, end]
+    variable_values = zeros(Float64, n - 1) # Valores de las variables
+    for j in 1:n-1 # Revisar cada columna excepto RHS
+        col = tableau[1:end-1, j] # Columna sin la fila de Z 
+        if count(!iszero, col) == 1 && any(col .== 1.0) # Verificar si es variable básica
+            row_index = findfirst(x -> x == 1.0, col) # Fila donde es 1
+            variable_values[j] = tableau[row_index, end] # Asignar valor de RHS
         end
     end
 
-    Z_opt = tableau[end, end]
-    return tableau, Z_opt, variable_values, iter
+    Z_opt = tableau[end, end] # Valor óptimo de Z
+    return tableau, Z_opt, variable_values, iter # Devuelve tabla final, Z óptimo, valores de variables, iteraciones
 end
 
 
@@ -623,11 +631,11 @@ Muestra el tableau de forma legible.
 """
 function print_tableau(tableau::Matrix{Float64}, var_names::Vector{String})
     println("\n--- Tableau Simplex ---")
-    header = join([name * " " for name in var_names], "")
-    println(" " ^ 3, header, " | RHS")
+    header = join([name * " " for name in var_names], "") # Une los nombres de variables
+    println(" " ^ 3, header, " | RHS")  # Encabezado de columnas con RHS
     for i in 1:size(tableau, 1)
         for j in 1:size(tableau, 2)
-            @printf("%9.2f ", tableau[i, j])
+            @printf("%9.2f ", tableau[i, j]) # Imprime valores con 2 decimales y ancho fijo
         end
         println()
     end
