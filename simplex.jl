@@ -394,11 +394,69 @@ function handle_constraints(problem::SimplexProblem)
     handle_constraints(problem) # Permanecer en el submenú
 end
 
+# Función para manejar la resolución del problema
+function handle_solve(problem::SimplexProblem)
+    try
+        # Construir el tableau inicial
+        tableau, var_names = build_simplex_table(problem)
+        println("\nTabla inicial del método Simplex:")
+        print_tableau(tableau, var_names)
+
+        # Resolver el método Simplex
+        tableau_final, z_opt, variable_values, iterations = simplex_solve(tableau)
+
+        # Mostrar la tabla final
+        println("\nTabla final del método Simplex:")
+        print_tableau(tableau_final, var_names)
+
+        # ===================== RESULTADOS ======================
+        println("\n====================== RESULTADOS ======================")
+        
+        # Mostrar el problema original
+        tipo = problem.objective_type == :maximize ? "Maximizar" : "Minimizar"
+        obj_str = join(["$(problem.objective_coeffs[i])x$i" for i in 1:problem.num_variables], " + ")
+        println("Problema original:")
+        println("  $tipo Z = $obj_str")
+        for (i, (coeffs, type, rhs)) in enumerate(problem.constraints)
+            restr = join(["$(coeffs[j])x$j" for j in 1:length(coeffs)], " + ")
+            type_str = type == Symbol("==") ? "=" : (type == :<= ? "<=" : (type == :>= ? ">=" : string(type)))
+            println("  $restr $type_str $rhs")
+        end
+        println("  xj ≥ 0")
+        println("-------------------------------------------------------")
+
+        # Mostrar número de iteraciones
+        @printf("Número de iteraciones: %d\n", iterations)
+
+        # Mostrar los valores de las variables
+        for (name, val) in zip(var_names, variable_values)
+            @printf("%-4s = %8.4f\n", name, val)
+        end
+        println("-------------------------------------------------------")
+
+        # Calcular valor óptimo de Z
+        z_value = tableau[end, end]
+        if problem.objective_type == :minimize
+            z_value = -z_value   # Corrige el signo si es un problema de minimización
+        end
+
+        println("Valor óptimo de Z = $(round(z_value, digits=4))")
+        println("=======================================================")
+    catch e
+        println("\nError al resolver: ", e)
+    end
+    print("\nPresione Enter para continuar...")
+    readline()
+end
+
+
 # --- 4. Funciones del Método Simplex ---
 
+const M = 1e6  # M grande
+
 """
-Convierte el problema en forma estándar (solo restricciones <=, con variables de holgura).
-Devuelve una matriz aumentada lista para el tableau inicial.
+Convierte el problema a forma estándar con variables de holgura, exceso y artificiales.
+Devuelve el tableau inicial y una lista con los nombres de las variables.
 """
 function build_simplex_table(problem::SimplexProblem)
     if isnothing(problem.num_variables) || isnothing(problem.objective_type) || isempty(problem.constraints)
@@ -408,7 +466,6 @@ function build_simplex_table(problem::SimplexProblem)
     num_vars = problem.num_variables
     num_cons = length(problem.constraints)
 
-    # Construcción de matriz de coeficientes
     A = zeros(Float64, num_cons, num_vars)
     b = zeros(Float64, num_cons)
     types = Symbol[]
@@ -419,68 +476,126 @@ function build_simplex_table(problem::SimplexProblem)
         push!(types, type)
     end
 
-    # Convertir restricciones a forma estándar con variables de holgura
-    slack_count = sum(t == :<= for t in types)
-    tableau = zeros(Float64, num_cons + 1, num_vars + slack_count + 1)
+    # Contadores
+    slack_vars = 0 # variables de holgura
+    excess_vars = 0 # variables de exceso
+    artificial_vars = 0 # variables artificiales
 
-    # Insertar coeficientes de restricciones
-    slack_col = 1
+    # Definir columnas extra según tipo de restricción
+    for t in types
+        if t == :<=
+            slack_vars += 1
+        elseif t == :>=
+            excess_vars += 1
+            artificial_vars += 1
+        elseif t == Symbol("==")
+            artificial_vars += 1
+        end
+    end
+
+    total_vars = num_vars + slack_vars + excess_vars + artificial_vars
+    tableau = zeros(Float64, num_cons + 1, total_vars + 1)
+
+    var_names = String[]
+    for i in 1:num_vars
+        push!(var_names, "x$i")
+    end
+
+    slack_col = num_vars + 1
+    excess_col = num_vars + slack_vars + 1
+    art_col = num_vars + slack_vars + excess_vars + 1
+
+    # Construir filas de restricciones
     for i in 1:num_cons
         tableau[i, 1:num_vars] = A[i, :]
         if types[i] == :<=
-            tableau[i, num_vars + slack_col] = 1.0
+            tableau[i, slack_col] = 1
+            push!(var_names, "s$(slack_col - num_vars)")
             slack_col += 1
+        elseif types[i] == :>=
+            tableau[i, excess_col] = -1
+            push!(var_names, "e$(excess_col - num_vars - slack_vars)")
+            tableau[i, art_col] = 1
+            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)")
+            art_col += 1
+            excess_col += 1
+        elseif types[i] == Symbol("==")
+            tableau[i, art_col] = 1
+            push!(var_names, "a$(art_col - num_vars - slack_vars - excess_vars)")
+            art_col += 1
         end
         tableau[i, end] = b[i]
     end
 
-    # Fila de la función objetivo
+    # Ajustar longitud de var_names
+    while length(var_names) < total_vars
+        push!(var_names, "var$(length(var_names)+1)")
+    end
+
+    # --- Función Objetivo ---
     z_sign = problem.objective_type == :maximize ? -1.0 : 1.0
     tableau[end, 1:num_vars] = z_sign .* problem.objective_coeffs
 
-    return tableau
+    # Penalización por M grande (solo si hay variables artificiales)
+    if artificial_vars > 0
+        start_artificial = total_vars - artificial_vars + 1
+        for j in start_artificial:total_vars
+            tableau[end, j] = M * z_sign
+        end
+
+        # Restar las filas donde las artificiales son básicas
+        for i in 1:num_cons
+            for j in start_artificial:total_vars
+                if tableau[i, j] == 1
+                    tableau[end, :] .-= M * z_sign .* tableau[i, :]
+                end
+            end
+        end
+    end
+
+    return tableau, var_names
 end
 
+
 """
-Aplica el algoritmo del método Simplex a un tableau.
-Devuelve: (tabla final, valor óptimo, valores de variables, número de iteraciones)
+Aplica el método Simplex (Big M si aplica).
+Devuelve: tabla final, valor óptimo, valores de variables, iteraciones.
 """
+
+const max_iter = 200
+
 function simplex_solve(tableau::Matrix{Float64})
-    max_iter = 100
     m, n = size(tableau)
     iter = 0
 
     while true
         iter += 1
+
+        # Verificación de límite de iteraciones
         if iter > max_iter
             println("Se alcanzó el número máximo de iteraciones ($max_iter).")
             break
         end
 
-        # 1. Verificar si la solución es óptima (no hay coeficientes negativos en la fila Z)
+        # Verificación de optimalidad
         z_row = tableau[end, 1:n-1]
         if all(z_row .>= -1e-8)
             println("\nSolución óptima encontrada en $iter iteraciones.")
             break
         end
 
-        # 2. Columna pivote (menor valor en Z)
         pivot_col = argmin(z_row)
 
-        # 3. Fila pivote (mínimo cociente positivo)
         ratios = [tableau[i, end] / tableau[i, pivot_col] for i in 1:m-1 if tableau[i, pivot_col] > 0]
         if isempty(ratios)
             println("Problema no acotado.")
             break
         end
-
         pivot_row = argmin([tableau[i, end] / tableau[i, pivot_col] > 0 ? tableau[i, end] / tableau[i, pivot_col] : Inf for i in 1:m-1])
 
-        # 4. Normalizar fila pivote
         pivot_val = tableau[pivot_row, pivot_col]
         tableau[pivot_row, :] ./= pivot_val
 
-        # 5. Eliminar columna pivote de otras filas
         for i in 1:m
             if i != pivot_row
                 factor = tableau[i, pivot_col]
@@ -489,8 +604,6 @@ function simplex_solve(tableau::Matrix{Float64})
         end
     end
 
-    # Calcular valores de las variables básicas
-    num_vars = n - m  # número aproximado de variables originales + holgura
     variable_values = zeros(Float64, n - 1)
     for j in 1:n-1
         col = tableau[1:end-1, j]
@@ -504,11 +617,14 @@ function simplex_solve(tableau::Matrix{Float64})
     return tableau, Z_opt, variable_values, iter
 end
 
+
 """
-Muestra el tableau en formato legible.
+Muestra el tableau de forma legible.
 """
-function print_tableau(tableau::Matrix{Float64})
+function print_tableau(tableau::Matrix{Float64}, var_names::Vector{String})
     println("\n--- Tableau Simplex ---")
+    header = join([name * " " for name in var_names], "")
+    println(" " ^ 3, header, " | RHS")
     for i in 1:size(tableau, 1)
         for j in 1:size(tableau, 2)
             @printf("%9.2f ", tableau[i, j])
@@ -516,7 +632,6 @@ function print_tableau(tableau::Matrix{Float64})
         println()
     end
 end
-
 
 # --- 5. Menú Principal ---
 
@@ -545,34 +660,16 @@ function main_menu()
 
         if choice == "1"
             handle_variables(problem)
+
         elseif choice == "2"
             handle_objective(problem)
+
         elseif choice == "3"
             handle_constraints(problem)
+
         elseif choice == "4"
-            try
-                tableau = build_simplex_table(problem)
-                println("\nTabla inicial del método Simplex:")
-                print_tableau(tableau)
+            handle_solve(problem)
 
-                tableau_final, z_opt, variable_values, iterations = simplex_solve(tableau)
-
-                println("\nTabla final del método Simplex:")
-                print_tableau(tableau_final)
-
-                println("\n====================== RESULTADOS ======================")
-                @printf("Número de iteraciones: %d\n", iterations)
-                for (i, val) in enumerate(variable_values)
-                    @printf("x%-2d = %8.4f\n", i, val)
-                end
-                println("-------------------------------------------------------")
-                println("Valor óptimo de Z = $(round(z_opt, digits=4))")
-                println("=======================================================")
-            catch e
-                println("\nError al resolver: ", e)
-            end
-            print("\nPresione Enter para continuar...")
-            readline()
         elseif choice == "5"
             println("Saliendo del programa. ¡Adiós!")
             break
